@@ -8,7 +8,12 @@
 
     <link rel="stylesheet" type="text/css" media="screen" href="stylesheets/slate.css">
 
+    {% if page.canonical %}
+    <link rel="canonical" href="{{page.canonical}}" />
+    {% endif %}
+
     <title>hasclass</title>
+
   </head>
 
   <body>
