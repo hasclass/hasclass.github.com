@@ -3,13 +3,24 @@ layout: hasclass
 title: Avoid intermediary objects and Function.apply
 ---
 
-# JS the fast parts
+# JavaScript the Fast Parts
 
 This is part of a mini-series [Javascript the Fast parts](/articles/javascript-the-fast-parts.html).
 
 ## Avoiding Function.apply
 
-Using [Function.prototype.apply](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Function/apply) is upto 4 times slower than calling the function directly ([jsperf.com/avoiding-apply-or-call](http://jsperf.com/avoiding-apply-or-call)). Clearly, if you're writing a library you should try to avoid `apply` whenever possible. Using `call` you still get a performance hit, but not as severe. Furthermore `apply` often requires intermediary objects.
+This article focuses on ways to avoid the use of `Function.prototype.apply`. Many JavaScript libraries depend on `apply` to implement core functionality. The versatility of this function comes with a price, it is [2-10 slower](http://jsperf.com/avoiding-apply-or-call) than calling a function directly. Additionally, `apply` usually needs to create  intermediary objects which is another performance bad smell.
+
+
+Outline:
+
+* [Explanation of intermediary objects](#intermediary_objects)
+* [Look at the `_.wrap` function of underscore](#wrap)
+* [Make it perform 2-20 times faster](#optimize_wrap)
+* [Extract the functionality for re-use](#extract_for_reuse)
+* [Create the applyFast function that outperforms apply by 2-10 times](#applyFast)
+
+<a name="intermediary_objects" /></a>
 
 ## Intermediary Objects
 
@@ -35,165 +46,160 @@ function hello(who) {
 
 After this contrived example let's look at the real-world.
 
-### underscore
+### Avoiding apply and intermediary objects
 
-Underscore provides a set of functions to maniuplate objects. It provides methods in a functional style (`_.last([1,2,3], 2)` but also adds an object-oriented layer on top of it `_([1,2,3]).last(2)`.
 
+<a name="wrap" /></a>
+
+### _.wrap(function, wrapper)
+
+From the docs: Wraps the first function inside of the wrapper function, passing it as the first argument. This allows the wrapper to execute code before and after the function runs, adjust the arguments, and execute it conditionally.
 
 ```javascript
-// functional
-_.last([1,2,3], 2)   // => [2,3]
-// object-oriented
-_([1,2,3])           // => {_wrapped: [1,2,3]}
-_([1,2,3]).last(2)   // => [2,3]
+var hello = function(name) { return "hello: " + name; };
+hello = _.wrap(hello, function(func) {
+  return "before, " + func("moe") + ", after";
+});
+hello();   // => 'before, hello: moe, after'
 ```
 
-The simplified implementation of the underscore wrapper boils down to the following:
+The implementation of _.wrap is short and concise:
 
 ```javascript
-// The wrapper class
-function Wrapper(obj) {
-  this._wrapped = obj;
-}
-
-// creates a wrapper object, e.g. _([1,2])
-function _(obj) { return new Wrapper(obj) }
-
-// functional methods added to the `_` object (a JS function).
-_.last = function (obj, len) {
-  // ...
+_.wrap = function(func, wrapper) {
+  return function() {
+    var args = [func];
+    push.apply(args, arguments);
+    return wrapper.apply(this, args);
+  };
 };
 ```
 
-### From OO to functional
+However there are the following inefficencies:
 
-The wrapper objects `last` method calls the corresponding functional method `_.last` with its `_wrapped` value as the first argument:
+* Creates an intermediary array `args`
+* Pushes arguments to that array. The second `apply` is actually a performant idiom
+* `apply` the `args` array to the `wrapper` function
 
-```javascript
-// Adding an oo-style method that calls a functional method
-Wrapper.prototype.last = function(len) {
-  return _.last(this._wrapped, len);
-}
-```
+While inefficient, this generic solution works for 0 to n arguments of the wrapper function. But all of this is work is unnecessary for wrapper functions that expect no arguments.
 
-In order to not repeat yourself and increase file size of the library, the OO-methods are created dynamically.
+<a name="optimize_wrap" /></a>
 
-### Refactor into a generic method
+### Optimize _.wrap for a common special case
 
-Instead of adding a hard-coded method body for all the methods they are added dynamically. If we refactor the `_.prototype.last` into a generic method that works with any amount of arguments we get something like this.
+A trivial optimization would be to optimize when arguments is empty. In that case we could simply use the much faster `call` operation.
 
 ```javascript
-// simplified implementation
-function wrapFunction (func) {
-  return function () {
-    var args = [this._wrapped];
-    Array.prototype.push.apply(args, arguments);
-    return func.apply(context, args);
+_.wrap = function(func, wrapper) {
+  return function() {
+    if (arguments.length === 0) return wrapper.call(this, func);
+    // fallback
+    var args = [func];
+    push.apply(args, arguments);
+    return wrapper.apply(this, args);
   }
-}
-
-Wrapper.prototype.last = wrapFunction(_.last);
+};
 ```
 
-The wrapFunction returns a function that prepends `this` to the method's arguments, calls the actual method and returns its return value. The following code shows how that would look like if it was hard-coded:
+The new function now is very fast when no arguments are given. And otherwise it falls back to the slower original implementation.
+
+### Optimize _.wrap for all cases
+
+The optimization we did for zero arguments can be repeated for cases where the arguments object is not empty.
 
 ```javascript
-// Generates a method like this:
-Wrapper.prototype.last = function () {
- var args = [this._wrapped];
- Array.prototype.push.apply(args, arguments);
- return _.last.apply(_, args);
-}
-```
-
-Unfortunately wrapFunction creates a big overhead. Everytime we call `_(obj).last()` the wrapped function does the following:
-
-* Create an intermediate extra array `args`
-* Pushes arguments to that array using `apply`
-* `args` are `apply`ed to the actual function
-
-While `apply` is slow by itself, it also requires the creation and manipulation of the intermediary array `args`.
-
-### Avoiding apply and intermediary objects
-
-All of this is unnecessary when you pass no arguments. So a trivial optimization would be to check for this case:
-
-```javascript
-// optimize for zero args
-function wrapFunction (func) {
-  return function () {
-    var len = arguments.length;
-    var val = this.__wrapped;
-    // Return early for commong case
-    if (len === 0) return func(val);
-
-    // slow fallback for arguments
-    var args = [this._wrapped];
-    Array.prototype.push.apply(args, arguments);
-    return func.apply(_, args);
-  }
-}
-```
-
-The same strategy can be applied to x arguments.
-
-```javascript
-function wrapFunction (func) {
-  return function () {
-    var val = this._wrapped;
+_.wrap = function(func, wrapper) {
+  return function() {
     switch (arguments.length) {
-      case 0: return func(val);
-      case 1: return func(val, arguments[0]);
-      case 2: return func(val, arguments[0], arguments[1]);
+      case 0: return wrapper.call(this, func);
+      case 1: return wrapper.call(this, func, arguments[0]);
+      case 2: return wrapper.call(this, func, arguments[0], arguments[1]);
+      // repeat x times...
+    }
+    // fallback
+    var args = [func];
+    push.apply(args, arguments);
+    return wrapper.apply(this, args);
+  }
+};
+```
+
+This optimized function now runs 2-10 faster. In most cases there are no more intermediary objects created and `apply` has been replaced by the much faster `call`.
+
+The downside is an increase of 70 bytes in minifed gzipped file size. However we can spread these bytes by reusing the fast method dispatching for other methods that use `apply`.
+
+<a name="extract_for_reuse" /></a>
+
+### Extract for reuse
+
+As above function is used in other places as well we extract that into a separate function.
+
+```javascript
+function fastApplyContextPrepend(func, context, prependObj) {
+  function () {
+    var a = arguments;
+    switch(a.length) {
+      case 0: return func.call(context, prependObj);
+      case 1: return func.call(context, prependObj, a[0]);
+      case 2: return func.call(context, prependObj, a[0], a[1]);
+      case 2: return func.call(context, prependObj, a[0], a[1], a[2]);
       // repeat x times..
     }
-    // slow fallback for more then x arguments
-    var args = [val];
-    Array.prototype.push.apply(args, arguments);
-    return func.apply(_, args);
+    // fallback
+    var args = [prependObj];
+    push.apply(args, arguments);
+    return wrapper.apply(context, args);
   }
 }
 ```
 
-That makes wrapFunction performs 3-10 times faster depending on your JS engine. And the fallback ensures that it still works with 20 arguments.
-
-### Optimized apply
-
-If that's not enough by now, let's extract above and make a faster Function.prototype.apply routine.
+The inner function `_.wrap` passes on the unchanged `arguments` to `fastApplyContextPrepend`.
 
 ```javascript
-function fastApply (fn, context, args) {
-  switch(args.length) {
-    case 0: return fn.call(context);
-    case 1: return fn.call(context, args[0]);
-    case 2: return fn.call(context, args[0], args[1]);
-  }
-  return fn.apply(context, args);
-}
-
-function noop(a,b) {};
-var obj = new Object();
-
-fastApply(noop, obj, [1,2]);
-// vs
-noop.apply(obj, [1,2]);
+_.wrap = function(func, wrapper) {
+  return fastApplyContextPrepend(wrapper, arguments, this, func);
+};
 ```
 
-And again, just by avoiding `apply` we get a significant boost; [2-10 x faster](http://jsperf.com/custom-apply). There's various variants on above functions. If you don't want to apply an actual context and just want to call a method with arguments in an array the overhead of `call` can be avoided by invoking the function directly.
+Result: [A cool 200% - 2000% improvement](http://jsperf.com/wrap-optimized)
+
+<a name="fastApply" /></a>
+
+### fastApply()
+
+If you only want to call a method with an arguments object or an array the overhead of `call` can be avoided by invoking the function directly.
 
 ```javascript
-function fastApplyNoContext (fn, args) {
-  switch(args.length) {
-    case 0: return fn();
-    case 1: return fn(args[0]);
+function fastApply (fn, args, context) {
+  if (context === undefined) {
+    switch(args.length) {
+      case 0: return fn();
+      case 1: return fn(args[0]);
+      // ...
+    }
+    return fn.apply(null, args);
+  } else {
+    // same as above but with call.
   }
-  return fn.apply(null, args);
 }
+
+function noop() { }
+
+noop.apply(null, []);
+fastApply(noop, []);  // 2-10 times faster than above
 ```
 
-## Final Words
+Just by avoiding `apply` we get a significant boost; [2-10 x faster](http://jsperf.com/custom-apply). And it works just like apply.
 
-This article focused a lot on avoiding `apply` which can give you a performance boost of a factor of 2-10 across browsers, new and old, Chrome, Safari or Firefox. But `apply` was not just the only bad smell in the code. By avoiding apply we also avoided the steps of creating an extra array and pushing elements of the function arguments into it.
+
+### apply is everywhere
+
+It is important to note that `apply` is not just used for some exotic functions like `_.wrap`. There's the `_.mixin` which is used by underscores OO-style `_(obj)`. These all could profit from above optimizations. However they might need variations of above applyFast methods.
+
+## Recap
+
+
+
 
 
 
