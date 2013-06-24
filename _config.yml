@@ -1,4 +1,4 @@
 safe: true
 lsi: false
-# markdown: redcarpet
+markdown: redcarpet
 pygments: true
