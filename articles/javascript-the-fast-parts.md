@@ -10,7 +10,7 @@ While writing the RubyJS library I learned a lot about writing fast JavaScript c
 
 ## Articles
 
-[Avoid intermediary objects and Function apply](/articles/avoid_intermediary_objects_and_apply.html)
+[Avoid intermediary objects and Function apply](/articles/avoid-intermediary-objects-and-apply.html)
 
 ## Should you micro optimize your code?
 
